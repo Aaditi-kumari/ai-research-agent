@@ -1,0 +1,160 @@
+"""
+AI Research Agent (Free Version)
+----------------------------------
+Same idea as agent.py, but zero cost — uses a local Ollama model instead
+of the Claude API, and DuckDuckGo's free search (no API key needed) instead
+of Anthropic's hosted web search.
+
+Requires:
+    - Ollama running locally (https://ollama.com) with a model pulled, e.g:
+        ollama pull llama3.1:8b
+    - pip install -r requirements_free.txt
+
+Usage:
+    python agent_free.py "impact of AI on Indian job market 2026"
+    python agent_free.py "impact of AI on Indian job market 2026" --output report.md --model llama3.1:8b
+"""
+
+import sys
+import argparse
+import json
+from datetime import datetime
+
+import requests
+from ddgs import DDGS
+
+OLLAMA_URL = "http://localhost:11434/api/generate"
+
+
+def call_ollama(prompt: str, model: str) -> str:
+    """Send a prompt to a local Ollama model and return its text response."""
+    try:
+        response = requests.post(
+            OLLAMA_URL,
+            json={"model": model, "prompt": prompt, "stream": False},
+            timeout=180,
+        )
+        response.raise_for_status()
+    except requests.exceptions.ConnectionError:
+        print("ERROR: Could not reach Ollama at localhost:11434.")
+        print("Make sure Ollama is installed and running: `ollama serve`")
+        sys.exit(1)
+    return response.json().get("response", "").strip()
+
+
+def generate_search_queries(topic: str, model: str, n: int = 3) -> list[str]:
+    """Ask the local model to break the topic into n distinct search queries."""
+    prompt = f"""You are a research planner. Break the topic below into
+{n} distinct, specific web search queries that together would give good
+coverage of the topic (background, current state/numbers, and different
+angles). Return ONLY a JSON array of strings, nothing else.
+
+Topic: {topic}
+"""
+    raw = call_ollama(prompt, model)
+    # Model sometimes wraps JSON in markdown fences — strip those if present
+    raw = raw.replace("```json", "").replace("```", "").strip()
+    try:
+        queries = json.loads(raw)
+        if isinstance(queries, list) and all(isinstance(q, str) for q in queries):
+            return queries[:n]
+    except json.JSONDecodeError:
+        pass
+    # Fallback: if the model didn't return clean JSON, just search the topic itself
+    return [topic]
+
+
+def search_web(query: str, max_results: int = 4) -> list[dict]:
+    """Run a free DuckDuckGo search and return a list of {title, url, snippet}."""
+    results = []
+    try:
+        with DDGS() as ddgs:
+            for r in ddgs.text(query, max_results=max_results):
+                results.append({
+                    "title": r.get("title", ""),
+                    "url": r.get("href", ""),
+                    "snippet": r.get("body", ""),
+                })
+    except Exception as e:
+        print(f"  (search failed for '{query}': {e})")
+    return results
+
+
+def synthesize_summary(topic: str, all_results: list[dict], model: str) -> str:
+    """Feed all gathered search snippets to the local model and get a final report."""
+    context_blocks = []
+    for r in all_results:
+        context_blocks.append(f"Title: {r['title']}\nURL: {r['url']}\nSnippet: {r['snippet']}")
+    context = "\n\n".join(context_blocks)
+
+    prompt = f"""You are a research agent. Using ONLY the search results below,
+write a well-organized Markdown summary on this topic: {topic}
+
+Search results:
+{context}
+
+Write the summary in this exact structure:
+## {topic}
+### Overview
+(2-3 sentences)
+### Key Points
+(bulleted list of the most important facts/points found)
+### Sources
+(list the URLs actually referenced above)
+
+Do not make up facts that aren't supported by the search results above.
+"""
+    return call_ollama(prompt, model)
+
+
+def run_research_agent(topic: str, model: str) -> dict:
+    print(f"Planning searches for: {topic}")
+    queries = generate_search_queries(topic, model)
+    print(f"Search queries: {queries}")
+
+    all_results = []
+    for q in queries:
+        print(f"  Searching: {q}")
+        results = search_web(q)
+        all_results.extend(results)
+
+    if not all_results:
+        return {"summary": "No search results found. Try a different topic or "
+                            "check your internet connection.", "sources": [], "queries": queries}
+
+    print("Synthesizing summary...")
+    summary = synthesize_summary(topic, all_results, model)
+    sources = sorted(set(r["url"] for r in all_results if r["url"]))
+
+    return {"summary": summary, "sources": sources, "queries": queries}
+
+
+def save_report(result: dict, output_path: str):
+    with open(output_path, "w", encoding="utf-8") as f:
+        f.write(result["summary"])
+        if result["sources"]:
+            f.write("\n\n### All sources searched\n")
+            for s in result["sources"]:
+                f.write(f"- {s}\n")
+        f.write(f"\n---\n*Generated by AI Research Agent (free/local version) on "
+                 f"{datetime.now().strftime('%Y-%m-%d %H:%M')}.*\n")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="AI Research Agent (Free Version)")
+    parser.add_argument("topic", help="Topic to research")
+    parser.add_argument("--output", "-o", default=None, help="Output markdown file")
+    parser.add_argument("--model", "-m", default="llama3.1:8b", help="Ollama model name")
+    args = parser.parse_args()
+
+    result = run_research_agent(args.topic, args.model)
+
+    output_path = args.output or f"report_{datetime.now().strftime('%Y%m%d_%H%M%S')}.md"
+    save_report(result, output_path)
+
+    print(f"\nDone. Sources found: {len(result['sources'])}")
+    print(f"Saved to: {output_path}")
+
+
+if __name__ == "__main__":
+    main()
