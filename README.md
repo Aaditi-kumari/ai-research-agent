@@ -14,7 +14,7 @@ writing, **DuckDuckGo** for search. No API key needed.
 angles.
 3. It runs those searches (DuckDuckGo, no key required).
 4. It synthesizes everything into a structured report: overview, key
-points, and a source list — grounded only in what it actually found.
+points, and a source list -grounded only in what it actually found.
 5. Saves the report as a `.md` file.
 
 ## Why I built this
